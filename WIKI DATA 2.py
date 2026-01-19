@@ -1,13 +1,9 @@
 """
-🛡️ Architecte d'Autorité Sémantique v8.3
+🛡️ Architecte d'Autorité Sémantique v8.4
 =========================================
-FILIATION AMÉLIORÉE:
-- P749 (parent organization) 
-- P127 (owned by) - fallback si P749 absent
-- P355 inverse (subsidiary) 
-- Mistral AI avec prompt optimisé pour trouver le parent
-
-Ex: Boursorama → Société Générale (via P127 ou Mistral)
+- SIREN maison mère auto-récupéré via INSEE
+- RS: LinkedIn, Twitter/X, Facebook, Instagram, TikTok, YouTube
+- Filiation: P749 + P127 + Mistral
 """
 
 import streamlit as st
@@ -21,54 +17,37 @@ from datetime import datetime
 # ============================================================================
 # VERSION
 # ============================================================================
-VERSION = "8.3.0"
-BUILD_DATE = "2025-01-19"
-BUILD_ID = "BUILD-830-FILIATION-ENHANCED"
+VERSION = "8.4.0"
+BUILD_ID = "BUILD-840-SIREN-PARENT"
 
 # ============================================================================
 # CONFIG
 # ============================================================================
 st.set_page_config(page_title=f"AAS v{VERSION}", page_icon="🛡️", layout="wide")
 
-# Bandeau version
 st.markdown(f"""
-<div style="
-    background: linear-gradient(90deg, #11998e 0%, #38ef7d 100%);
-    color: white;
-    padding: 12px 20px;
-    border-radius: 8px;
-    margin-bottom: 20px;
-    text-align: center;
-    font-weight: bold;
-">
-    🛡️ AAS v{VERSION} | {BUILD_ID} | Filiation Enhanced (P749 + P127 + Mistral)
+<div style="background: linear-gradient(90deg, #11998e 0%, #38ef7d 100%); color: white; padding: 12px 20px; border-radius: 8px; margin-bottom: 20px; text-align: center; font-weight: bold;">
+    🛡️ AAS v{VERSION} | {BUILD_ID}
 </div>
 """, unsafe_allow_html=True)
 
 # ============================================================================
 # SESSION STATE
 # ============================================================================
-defaults = {
-    'logs': [],
-    'entity': None,
-    'wiki_results': [],
-    'insee_results': [],
-    'social_links': {k: '' for k in ['linkedin', 'twitter', 'facebook', 'instagram', 'youtube']},
-    'authenticated': False,
-    'mistral_key': ''
-}
-for k, v in defaults.items():
-    if k not in st.session_state:
-        st.session_state[k] = v
-
+if 'logs' not in st.session_state: st.session_state.logs = []
+if 'entity' not in st.session_state: st.session_state.entity = None
+if 'wiki_results' not in st.session_state: st.session_state.wiki_results = []
+if 'insee_results' not in st.session_state: st.session_state.insee_results = []
+if 'social_links' not in st.session_state: 
+    st.session_state.social_links = {'linkedin': '', 'twitter': '', 'facebook': '', 'instagram': '', 'tiktok': '', 'youtube': ''}
+if 'authenticated' not in st.session_state: st.session_state.authenticated = False
+if 'mistral_key' not in st.session_state: st.session_state.mistral_key = ''
 
 def log(msg: str, level: str = "INFO"):
     ts = datetime.now().strftime("%H:%M:%S")
-    icons = {"INFO": "ℹ️", "OK": "✅", "ERROR": "❌", "WARN": "⚠️", "HTTP": "🌐", "PARENT": "🔗"}
+    icons = {"INFO": "ℹ️", "OK": "✅", "ERROR": "❌", "WARN": "⚠️", "HTTP": "🌐"}
     st.session_state.logs.append(f"{icons.get(level, '•')} [{ts}] {msg}")
-    if len(st.session_state.logs) > 50:
-        st.session_state.logs = st.session_state.logs[-50:]
-
+    if len(st.session_state.logs) > 50: st.session_state.logs = st.session_state.logs[-50:]
 
 # ============================================================================
 # DATA CLASS
@@ -91,176 +70,122 @@ class Entity:
     org_type: str = "Organization"
     parent_org_name: str = ""
     parent_org_qid: str = ""
-    parent_org_siren: str = ""
-    parent_source: str = ""  # "P749", "P127", "Mistral"
+    parent_org_siren: str = ""  # SIREN maison mère
+    parent_source: str = ""
     address: str = ""
 
     def score(self) -> int:
         s = 0
-        if self.qid: s += 20
-        if self.siren: s += 20
-        if self.lei: s += 15
+        if self.qid: s += 15
+        if self.siren: s += 15
+        if self.lei: s += 10
         if self.website: s += 15
         if self.parent_org_qid: s += 15
-        if self.expertise_fr: s += 15
+        if self.parent_org_siren: s += 10  # Bonus SIREN parent
+        if self.expertise_fr: s += 10
+        if self.description_fr: s += 10
         return min(s, 100)
-
 
 if st.session_state.entity is None:
     st.session_state.entity = Entity()
 
-
 # ============================================================================
-# WIKIDATA API - FILIATION ENHANCED
+# WIKIDATA API
 # ============================================================================
 class WikidataAPI:
-    """API Wikidata avec recherche de filiation multi-propriétés."""
-    
     BASE_URL = "https://www.wikidata.org/w/api.php"
-    HEADERS = {"User-Agent": f"AAS-Bot/{VERSION}", "Accept": "application/json"}
+    HEADERS = {"User-Agent": f"AAS/{VERSION}", "Accept": "application/json"}
     
     @staticmethod
     def search(query: str) -> List[Dict]:
-        """Recherche d'entités."""
-        log(f"Wikidata search: '{query}'", "HTTP")
-        
-        params = {
-            "action": "wbsearchentities",
-            "search": query,
-            "language": "fr",
-            "uselang": "fr",
-            "format": "json",
-            "limit": 12,
-            "type": "item"
-        }
-        
+        log(f"Wikidata: '{query}'", "HTTP")
         try:
-            r = requests.get(WikidataAPI.BASE_URL, params=params, headers=WikidataAPI.HEADERS, timeout=20)
+            r = requests.get(WikidataAPI.BASE_URL, params={
+                "action": "wbsearchentities", "search": query, "language": "fr",
+                "uselang": "fr", "format": "json", "limit": 12, "type": "item"
+            }, headers=WikidataAPI.HEADERS, timeout=20)
             if r.status_code == 200:
                 results = r.json().get('search', [])
                 log(f"{len(results)} résultats", "OK")
-                return [{'qid': item['id'], 'label': item.get('label', item['id']), 'desc': item.get('description', '')} for item in results]
+                return [{'qid': i['id'], 'label': i.get('label', i['id']), 'desc': i.get('description', '')} for i in results]
         except Exception as e:
             log(f"Erreur: {e}", "ERROR")
         return []
     
     @staticmethod
     def get_entity(qid: str) -> Dict:
-        """
-        Récupère les détails avec FILIATION MULTI-SOURCES:
-        1. P749 (parent organization) - priorité 1
-        2. P127 (owned by) - priorité 2
-        3. Recherche inverse via P355 (subsidiary)
-        """
-        log(f"Get entity: {qid}", "HTTP")
-        
-        result = {
-            "name_fr": "", "name_en": "", "desc_fr": "", "desc_en": "",
-            "siren": "", "lei": "", "website": "",
-            "parent_qid": "", "parent_name": "", "parent_source": ""
-        }
-        
-        params = {
-            "action": "wbgetentities",
-            "ids": qid,
-            "languages": "fr|en",
-            "props": "labels|descriptions|claims",
-            "format": "json"
-        }
+        log(f"Get: {qid}", "HTTP")
+        result = {"name_fr": "", "name_en": "", "desc_fr": "", "desc_en": "", "siren": "", "lei": "", "website": "", "parent_qid": "", "parent_name": "", "parent_source": ""}
         
         try:
-            r = requests.get(WikidataAPI.BASE_URL, params=params, headers=WikidataAPI.HEADERS, timeout=20)
+            r = requests.get(WikidataAPI.BASE_URL, params={
+                "action": "wbgetentities", "ids": qid, "languages": "fr|en",
+                "props": "labels|descriptions|claims", "format": "json"
+            }, headers=WikidataAPI.HEADERS, timeout=20)
             
             if r.status_code == 200:
                 entity = r.json().get('entities', {}).get(qid, {})
+                if not entity: return result
                 
-                if not entity:
-                    return result
-                
-                # Labels & Descriptions
                 labels = entity.get('labels', {})
                 descs = entity.get('descriptions', {})
+                claims = entity.get('claims', {})
+                
                 result["name_fr"] = labels.get('fr', {}).get('value', '')
                 result["name_en"] = labels.get('en', {}).get('value', '')
                 result["desc_fr"] = descs.get('fr', {}).get('value', '')
                 result["desc_en"] = descs.get('en', {}).get('value', '')
                 
-                claims = entity.get('claims', {})
-                log(f"Claims: {len(claims)} propriétés", "INFO")
-                
                 # SIREN P1616
                 if 'P1616' in claims:
-                    try:
-                        result["siren"] = claims['P1616'][0]['mainsnak']['datavalue']['value']
-                        log(f"SIREN: {result['siren']}", "OK")
+                    try: result["siren"] = claims['P1616'][0]['mainsnak']['datavalue']['value']
                     except: pass
                 
                 # LEI P1278
                 if 'P1278' in claims:
-                    try:
-                        result["lei"] = claims['P1278'][0]['mainsnak']['datavalue']['value']
+                    try: result["lei"] = claims['P1278'][0]['mainsnak']['datavalue']['value']
                     except: pass
                 
                 # Website P856
                 if 'P856' in claims:
-                    try:
-                        result["website"] = claims['P856'][0]['mainsnak']['datavalue']['value']
+                    try: result["website"] = claims['P856'][0]['mainsnak']['datavalue']['value']
                     except: pass
                 
-                # ========== FILIATION ==========
-                
-                # 1. P749 - Parent Organization (priorité 1)
+                # Parent P749
                 if 'P749' in claims:
-                    log("Checking P749 (parent organization)...", "PARENT")
                     try:
                         pval = claims['P749'][0]['mainsnak']['datavalue']['value']
-                        if isinstance(pval, dict):
-                            result["parent_qid"] = pval.get('id', '')
-                        elif isinstance(pval, str):
-                            result["parent_qid"] = pval
-                        
+                        result["parent_qid"] = pval.get('id', '') if isinstance(pval, dict) else pval
                         if result["parent_qid"]:
                             result["parent_name"] = WikidataAPI.get_label(result["parent_qid"])
                             result["parent_source"] = "P749"
-                            log(f"✅ Parent P749: {result['parent_name']} ({result['parent_qid']})", "OK")
-                    except Exception as e:
-                        log(f"P749 error: {e}", "WARN")
+                            log(f"Parent P749: {result['parent_name']}", "OK")
+                    except: pass
                 
-                # 2. P127 - Owned By (priorité 2, si P749 vide)
+                # Parent P127 (fallback)
                 if not result["parent_qid"] and 'P127' in claims:
-                    log("P749 vide, checking P127 (owned by)...", "PARENT")
                     try:
                         pval = claims['P127'][0]['mainsnak']['datavalue']['value']
-                        if isinstance(pval, dict):
-                            result["parent_qid"] = pval.get('id', '')
-                        elif isinstance(pval, str):
-                            result["parent_qid"] = pval
-                        
+                        result["parent_qid"] = pval.get('id', '') if isinstance(pval, dict) else pval
                         if result["parent_qid"]:
                             result["parent_name"] = WikidataAPI.get_label(result["parent_qid"])
                             result["parent_source"] = "P127"
-                            log(f"✅ Parent P127: {result['parent_name']} ({result['parent_qid']})", "OK")
-                    except Exception as e:
-                        log(f"P127 error: {e}", "WARN")
+                            log(f"Parent P127: {result['parent_name']}", "OK")
+                    except: pass
                 
-                # 3. Si toujours rien, on log
                 if not result["parent_qid"]:
-                    log("❌ Pas de P749 ni P127 dans Wikidata", "WARN")
-                    log("→ Utilise GEO Magic (Mistral) pour détecter le parent", "INFO")
-                
-                log(f"Entity chargée: {result['name_fr']}", "OK")
-                
+                    log("Pas de parent Wikidata", "WARN")
+                    
         except Exception as e:
             log(f"Exception: {e}", "ERROR")
-        
         return result
     
     @staticmethod
     def get_label(qid: str) -> str:
-        """Récupère le label d'un QID."""
         try:
-            params = {"action": "wbgetentities", "ids": qid, "languages": "fr|en", "props": "labels", "format": "json"}
-            r = requests.get(WikidataAPI.BASE_URL, params=params, headers=WikidataAPI.HEADERS, timeout=10)
+            r = requests.get(WikidataAPI.BASE_URL, params={
+                "action": "wbgetentities", "ids": qid, "languages": "fr|en", "props": "labels", "format": "json"
+            }, headers=WikidataAPI.HEADERS, timeout=10)
             if r.status_code == 200:
                 labels = r.json().get('entities', {}).get(qid, {}).get('labels', {})
                 return labels.get('fr', {}).get('value', '') or labels.get('en', {}).get('value', qid)
@@ -268,19 +193,18 @@ class WikidataAPI:
         return qid
     
     @staticmethod
-    def search_parent_qid(parent_name: str) -> str:
-        """Recherche le QID d'un parent par son nom."""
-        log(f"Recherche QID pour: {parent_name}", "HTTP")
+    def get_siren(qid: str) -> str:
+        """Récupère le SIREN d'un QID."""
         try:
-            results = WikidataAPI.search(parent_name)
-            if results:
-                # Prendre le premier résultat
-                qid = results[0]['qid']
-                log(f"QID trouvé: {qid}", "OK")
-                return qid
+            r = requests.get(WikidataAPI.BASE_URL, params={
+                "action": "wbgetentities", "ids": qid, "props": "claims", "format": "json"
+            }, headers=WikidataAPI.HEADERS, timeout=10)
+            if r.status_code == 200:
+                claims = r.json().get('entities', {}).get(qid, {}).get('claims', {})
+                if 'P1616' in claims:
+                    return claims['P1616'][0]['mainsnak']['datavalue']['value']
         except: pass
         return ""
-
 
 # ============================================================================
 # INSEE API
@@ -288,153 +212,110 @@ class WikidataAPI:
 class INSEEAPI:
     @staticmethod
     def search(query: str) -> List[Dict]:
-        log(f"INSEE search: '{query}'", "HTTP")
+        log(f"INSEE: '{query}'", "HTTP")
         try:
             r = requests.get("https://recherche-entreprises.api.gouv.fr/search", params={"q": query, "per_page": 10}, timeout=15)
             if r.status_code == 200:
                 results = r.json().get('results', [])
-                log(f"INSEE: {len(results)} résultats", "OK")
+                log(f"{len(results)} résultats", "OK")
                 return [{
-                    'siren': item.get('siren', ''),
-                    'siret': item.get('siege', {}).get('siret', ''),
-                    'name': item.get('nom_complet', ''),
-                    'legal_name': item.get('nom_raison_sociale', ''),
-                    'naf': item.get('activite_principale', ''),
-                    'address': f"{item.get('siege', {}).get('adresse', '')} {item.get('siege', {}).get('code_postal', '')} {item.get('siege', {}).get('commune', '')}",
-                    'active': item.get('etat_administratif') == 'A'
-                } for item in results]
+                    'siren': i.get('siren', ''),
+                    'siret': i.get('siege', {}).get('siret', ''),
+                    'name': i.get('nom_complet', ''),
+                    'legal_name': i.get('nom_raison_sociale', ''),
+                    'naf': i.get('activite_principale', ''),
+                    'address': f"{i.get('siege', {}).get('adresse', '')} {i.get('siege', {}).get('code_postal', '')} {i.get('siege', {}).get('commune', '')}",
+                    'active': i.get('etat_administratif') == 'A'
+                } for i in results]
         except Exception as e:
             log(f"INSEE error: {e}", "ERROR")
         return []
-
+    
+    @staticmethod
+    def get_siren_by_name(name: str) -> str:
+        """Recherche SIREN par nom d'entreprise."""
+        log(f"INSEE SIREN: '{name}'", "HTTP")
+        try:
+            r = requests.get("https://recherche-entreprises.api.gouv.fr/search", params={"q": name, "per_page": 1}, timeout=10)
+            if r.status_code == 200:
+                results = r.json().get('results', [])
+                if results:
+                    siren = results[0].get('siren', '')
+                    log(f"SIREN trouvé: {siren}", "OK")
+                    return siren
+        except: pass
+        return ""
 
 # ============================================================================
-# MISTRAL API - PROMPT OPTIMISÉ POUR FILIATION
+# MISTRAL API
 # ============================================================================
 def mistral_optimize(api_key: str, entity) -> Optional[Dict]:
-    """Mistral avec prompt optimisé pour trouver le parent."""
-    if not api_key:
-        return None
+    if not api_key: return None
+    log("Mistral...", "HTTP")
     
-    log("🤖 Mistral: recherche filiation...", "HTTP")
-    
-    # Prompt spécialement conçu pour trouver le parent
-    prompt = f"""Tu es un expert en analyse d'entreprises et données Wikidata.
-
-ENTREPRISE À ANALYSER:
+    prompt = f"""Expert entreprises françaises. Analyse:
 - Nom: {entity.name}
-- SIREN: {entity.siren or 'Non renseigné'}
-- QID Wikidata: {entity.qid or 'Non renseigné'}
-- Site web: {entity.website or 'Non renseigné'}
+- SIREN: {entity.siren or 'N/A'}
+- QID: {entity.qid or 'N/A'}
 
-MISSION PRIORITAIRE - FILIATION:
-1. Identifie la MAISON MÈRE / SOCIÉTÉ MÈRE / HOLDING de cette entreprise
-2. Pour les banques en ligne françaises, vérifie si c'est une filiale d'un grand groupe bancaire
-3. Exemples connus:
-   - Boursorama / BoursoBank → Société Générale (Q270618)
-   - Hello Bank → BNP Paribas (Q499707)
-   - Fortuneo → Crédit Mutuel Arkéa (Q3006220)
-   - Orange Bank → Orange (Q1431486)
+TROUVE LA MAISON MÈRE. Exemples:
+- Boursorama/BoursoBank → Société Générale (Q270618)
+- Hello Bank → BNP Paribas (Q499707)
+- Fortuneo → Crédit Mutuel Arkéa
 
-RÉPONDS EN JSON STRICT (pas de markdown, pas de commentaires):
-{{
-    "description_fr": "Description SEO optimisée 150-200 caractères",
-    "description_en": "English SEO description",
-    "expertise_fr": "Domaine1, Domaine2, Domaine3",
-    "expertise_en": "Domain1, Domain2, Domain3",
-    "parent_org_name": "NOM EXACT de la maison mère (ou null si indépendante)",
-    "parent_org_qid": "QID Wikidata du parent ex: Q270618 (ou null si inconnu)"
-}}
-
-IMPORTANT: 
-- Pour Boursorama/BoursoBank, le parent est Société Générale (Q270618)
-- Sois précis sur le QID, vérifie dans ta base de connaissances
-- Si tu n'es pas sûr du QID, mets null mais donne quand même le nom"""
+JSON STRICT:
+{{"description_fr": "...", "description_en": "...", "expertise_fr": "A, B, C", "expertise_en": "X, Y, Z", "parent_org_name": "Nom exact ou null", "parent_org_qid": "Qxxxxxx ou null"}}"""
 
     try:
-        r = requests.post(
-            "https://api.mistral.ai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json={
-                "model": "mistral-small-latest",
-                "messages": [{"role": "user", "content": prompt}],
-                "response_format": {"type": "json_object"},
-                "temperature": 0.1  # Très bas pour être précis
-            },
-            timeout=30
-        )
-        
+        r = requests.post("https://api.mistral.ai/v1/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}"},
+            json={"model": "mistral-small-latest", "messages": [{"role": "user", "content": prompt}],
+                  "response_format": {"type": "json_object"}, "temperature": 0.1}, timeout=30)
         if r.status_code == 200:
-            content = r.json()['choices'][0]['message']['content']
-            result = json.loads(content)
-            
-            # Log du résultat
+            result = json.loads(r.json()['choices'][0]['message']['content'])
             if result.get('parent_org_name'):
-                log(f"✅ Mistral Parent: {result['parent_org_name']} ({result.get('parent_org_qid', '?')})", "OK")
-            else:
-                log("Mistral: pas de parent trouvé", "WARN")
-            
+                log(f"Parent Mistral: {result['parent_org_name']}", "OK")
             return result
-        else:
-            log(f"Mistral HTTP {r.status_code}", "ERROR")
     except Exception as e:
         log(f"Mistral error: {e}", "ERROR")
-    
     return None
-
 
 # ============================================================================
 # AUTH
 # ============================================================================
 if not st.session_state.authenticated:
-    st.markdown("<h2 style='text-align:center'>🔐 Accès Restreint</h2>", unsafe_allow_html=True)
+    st.markdown("<h2 style='text-align:center'>🔐 Accès</h2>", unsafe_allow_html=True)
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
-        pwd = st.text_input("Mot de passe:", type="password")
-        if st.button("🔓 Déverrouiller", type="primary", use_container_width=True):
-            if pwd == "SEOTOOLS":
+        if st.text_input("Mot de passe:", type="password", key="pwd") == "SEOTOOLS":
+            if st.button("🔓 Entrer", type="primary", use_container_width=True):
                 st.session_state.authenticated = True
                 st.rerun()
     st.stop()
-
 
 # ============================================================================
 # SIDEBAR
 # ============================================================================
 with st.sidebar:
-    st.header("⚙️ Configuration")
-    
-    # Logs
     with st.expander("📟 Logs", expanded=True):
-        log_box = st.container(height=200)
-        with log_box:
-            for entry in reversed(st.session_state.logs[-15:]):
-                if "ERROR" in entry or "❌" in entry:
-                    st.error(entry)
-                elif "OK" in entry or "✅" in entry:
-                    st.success(entry)
-                elif "PARENT" in entry or "🔗" in entry:
-                    st.info(entry)
-                else:
-                    st.caption(entry)
+        for entry in reversed(st.session_state.logs[-12:]):
+            if "ERROR" in entry: st.error(entry)
+            elif "OK" in entry: st.success(entry)
+            else: st.caption(entry)
     
     st.divider()
-    st.session_state.mistral_key = st.text_input("🔑 Clé Mistral", st.session_state.mistral_key, type="password")
+    st.session_state.mistral_key = st.text_input("🔑 Mistral", st.session_state.mistral_key, type="password")
     
     st.divider()
-    st.subheader("🔍 Recherche")
     source = st.radio("Source", ["Wikidata", "INSEE", "Les deux"], horizontal=True)
-    query = st.text_input("Organisation", placeholder="Boursorama, IKEA...")
+    query = st.text_input("🔍 Organisation")
     
     c1, c2 = st.columns(2)
     with c1:
-        if st.button("🔎 Chercher", type="primary", use_container_width=True):
-            if query:
-                if source in ["Wikidata", "Les deux"]:
-                    st.session_state.wiki_results = WikidataAPI.search(query)
-                if source in ["INSEE", "Les deux"]:
-                    st.session_state.insee_results = INSEEAPI.search(query)
-                st.rerun()
+        if st.button("🔎 Chercher", type="primary", use_container_width=True) and query:
+            if source in ["Wikidata", "Les deux"]: st.session_state.wiki_results = WikidataAPI.search(query)
+            if source in ["INSEE", "Les deux"]: st.session_state.insee_results = INSEEAPI.search(query)
+            st.rerun()
     with c2:
         if st.button("🗑️ Reset", use_container_width=True):
             st.session_state.entity = Entity()
@@ -442,41 +323,31 @@ with st.sidebar:
             st.session_state.insee_results = []
             st.rerun()
     
-    # Résultats Wikidata
+    # Résultats
     if st.session_state.wiki_results:
         st.markdown("**🌐 Wikidata:**")
         for i, item in enumerate(st.session_state.wiki_results[:8]):
-            if st.button(f"{item['qid']}: {item['label'][:22]}", key=f"w{i}", use_container_width=True):
+            if st.button(f"{item['qid']}: {item['label'][:20]}", key=f"w{i}", use_container_width=True):
                 details = WikidataAPI.get_entity(item['qid'])
                 e = st.session_state.entity
-                e.qid = item['qid']
-                e.name = details['name_fr'] or item['label']
-                e.name_en = details['name_en']
-                e.description_fr = details['desc_fr']
-                e.description_en = details['desc_en']
-                e.siren = e.siren or details['siren']
-                e.lei = details['lei']
-                e.website = e.website or details['website']
-                e.parent_org_qid = details['parent_qid']
-                e.parent_org_name = details['parent_name']
-                e.parent_source = details['parent_source']
+                e.qid, e.name, e.name_en = item['qid'], details['name_fr'] or item['label'], details['name_en']
+                e.description_fr, e.description_en = details['desc_fr'], details['desc_en']
+                e.siren, e.lei, e.website = e.siren or details['siren'], details['lei'], e.website or details['website']
+                e.parent_org_qid, e.parent_org_name, e.parent_source = details['parent_qid'], details['parent_name'], details['parent_source']
+                # Auto SIREN parent
+                if e.parent_org_qid and not e.parent_org_siren:
+                    e.parent_org_siren = WikidataAPI.get_siren(e.parent_org_qid)
+                    if e.parent_org_siren: log(f"SIREN parent: {e.parent_org_siren}", "OK")
                 st.rerun()
     
-    # Résultats INSEE
     if st.session_state.insee_results:
         st.markdown("**🏛️ INSEE:**")
         for i, item in enumerate(st.session_state.insee_results[:6]):
-            status = "🟢" if item['active'] else "🔴"
-            if st.button(f"{status} {item['name'][:22]}", key=f"i{i}", use_container_width=True):
+            if st.button(f"{'🟢' if item['active'] else '🔴'} {item['name'][:20]}", key=f"i{i}", use_container_width=True):
                 e = st.session_state.entity
-                e.name = e.name or item['name']
-                e.legal_name = item['legal_name']
-                e.siren = item['siren']
-                e.siret = item['siret']
-                e.naf = item['naf']
-                e.address = item['address']
+                e.name, e.legal_name, e.siren, e.siret = e.name or item['name'], item['legal_name'], item['siren'], item['siret']
+                e.naf, e.address = item['naf'], item['address']
                 st.rerun()
-
 
 # ============================================================================
 # MAIN
@@ -484,20 +355,17 @@ with st.sidebar:
 e = st.session_state.entity
 
 if e.name or e.qid or e.siren:
-    # Metrics avec Parent
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Score", f"{e.score()}%")
-    col2.metric("QID", e.qid or "—")
-    col3.metric("SIREN", e.siren or "—")
+    # Metrics
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("Score", f"{e.score()}%")
+    m2.metric("QID", e.qid or "—")
+    m3.metric("SIREN", e.siren or "—")
+    m4.metric("Parent QID", e.parent_org_qid or "—")
+    m5.metric("Parent SIREN", e.parent_org_siren or "—")
     
-    if e.parent_org_qid:
-        col4.metric("🔗 Parent", f"{e.parent_org_qid}", delta=e.parent_source)
-    else:
-        col4.metric("Parent", "—")
+    tabs = st.tabs(["🆔 Identité", "🔗 Filiation", "🪄 GEO Magic", "📱 Réseaux Sociaux", "💾 JSON-LD"])
     
-    # Tabs
-    tabs = st.tabs(["🆔 Identité", "🔗 Filiation", "🪄 GEO Magic", "📱 Social", "💾 JSON-LD"])
-    
+    # Identité
     with tabs[0]:
         c1, c2 = st.columns(2)
         with c1:
@@ -511,136 +379,115 @@ if e.name or e.qid or e.siren:
             e.website = st.text_input("Site web", e.website)
             e.address = st.text_input("Adresse", e.address)
     
+    # Filiation
     with tabs[1]:
         st.subheader("🔗 Filiation (Parent Organization)")
         
-        # Info sur les sources
-        st.info("""
-        **Sources de filiation (par priorité):**
-        1. **P749** - Parent Organization (Wikidata)
-        2. **P127** - Owned By (Wikidata) 
-        3. **Mistral AI** - Détection intelligente
-        """)
-        
-        c1, c2 = st.columns(2)
+        c1, c2, c3 = st.columns(3)
         with c1:
             e.parent_org_name = st.text_input("Nom maison mère", e.parent_org_name)
         with c2:
             e.parent_org_qid = st.text_input("QID maison mère", e.parent_org_qid)
-        
-        e.parent_org_siren = st.text_input("SIREN maison mère", e.parent_org_siren)
+        with c3:
+            e.parent_org_siren = st.text_input("SIREN maison mère", e.parent_org_siren)
         
         if e.parent_org_qid:
-            source_badge = f"Source: {e.parent_source}" if e.parent_source else ""
-            st.success(f"✅ **Filiation:** {e.name} → [{e.parent_org_name}](https://www.wikidata.org/wiki/{e.parent_org_qid}) {source_badge}")
+            st.success(f"✅ {e.name} → [{e.parent_org_name}](https://www.wikidata.org/wiki/{e.parent_org_qid}) | SIREN: {e.parent_org_siren or 'N/A'}")
         else:
-            st.warning("⚠️ Pas de filiation trouvée. Clique sur **GEO Magic** pour la détecter via Mistral AI.")
-            
-            # Bouton rapide pour Mistral
-            if st.button("🪄 Détecter Parent avec Mistral", type="primary"):
-                if st.session_state.mistral_key:
-                    with st.spinner("Mistral analyse..."):
-                        result = mistral_optimize(st.session_state.mistral_key, e)
-                    if result and result.get('parent_org_name'):
-                        e.parent_org_name = result['parent_org_name']
-                        e.parent_org_qid = result.get('parent_org_qid', '')
-                        e.parent_source = "Mistral"
-                        
-                        # Si on a le nom mais pas le QID, on cherche
-                        if e.parent_org_name and not e.parent_org_qid:
-                            e.parent_org_qid = WikidataAPI.search_parent_qid(e.parent_org_name)
-                        
-                        st.rerun()
-                    else:
-                        st.error("Mistral n'a pas trouvé de parent")
-                else:
-                    st.error("🔑 Clé Mistral requise")
-    
-    with tabs[2]:
-        st.subheader("🪄 GEO Magic (Mistral AI)")
+            st.warning("⚠️ Pas de filiation. Utilise Mistral ci-dessous.")
         
-        if st.button("🪄 Auto-Optimize Complet", type="primary"):
+        if st.button("🪄 Détecter Parent (Mistral)", type="primary"):
             if st.session_state.mistral_key:
-                with st.spinner("Mistral en cours..."):
+                with st.spinner("Analyse..."):
                     result = mistral_optimize(st.session_state.mistral_key, e)
-                
+                if result and result.get('parent_org_name'):
+                    e.parent_org_name = result['parent_org_name']
+                    e.parent_org_qid = result.get('parent_org_qid', '')
+                    e.parent_source = "Mistral"
+                    # Chercher SIREN parent
+                    if e.parent_org_name and not e.parent_org_siren:
+                        # Via Wikidata si on a le QID
+                        if e.parent_org_qid:
+                            e.parent_org_siren = WikidataAPI.get_siren(e.parent_org_qid)
+                        # Sinon via INSEE
+                        if not e.parent_org_siren:
+                            e.parent_org_siren = INSEEAPI.get_siren_by_name(e.parent_org_name)
+                    st.rerun()
+            else:
+                st.error("🔑 Clé Mistral requise")
+    
+    # GEO Magic
+    with tabs[2]:
+        if st.button("🪄 Auto-Optimize", type="primary"):
+            if st.session_state.mistral_key:
+                with st.spinner("Mistral..."):
+                    result = mistral_optimize(st.session_state.mistral_key, e)
                 if result:
                     e.description_fr = result.get('description_fr', e.description_fr)
                     e.description_en = result.get('description_en', e.description_en)
                     e.expertise_fr = result.get('expertise_fr', e.expertise_fr)
                     e.expertise_en = result.get('expertise_en', e.expertise_en)
-                    
-                    # Filiation
                     if not e.parent_org_name and result.get('parent_org_name'):
-                        e.parent_org_name = result['parent_org_name']
-                        e.parent_source = "Mistral"
-                    if not e.parent_org_qid and result.get('parent_org_qid'):
-                        e.parent_org_qid = result['parent_org_qid']
-                    
-                    # Si on a le nom mais pas le QID, on cherche
-                    if e.parent_org_name and not e.parent_org_qid:
-                        e.parent_org_qid = WikidataAPI.search_parent_qid(e.parent_org_name)
-                    
+                        e.parent_org_name, e.parent_org_qid, e.parent_source = result['parent_org_name'], result.get('parent_org_qid', ''), "Mistral"
+                        if e.parent_org_qid: e.parent_org_siren = WikidataAPI.get_siren(e.parent_org_qid)
+                        if not e.parent_org_siren: e.parent_org_siren = INSEEAPI.get_siren_by_name(e.parent_org_name)
                     st.rerun()
-            else:
-                st.error("🔑 Clé Mistral requise")
         
-        e.description_fr = st.text_area("Description FR", e.description_fr, height=100)
-        e.description_en = st.text_area("Description EN", e.description_en, height=100)
+        e.description_fr = st.text_area("Description FR", e.description_fr, height=80)
+        e.description_en = st.text_area("Description EN", e.description_en, height=80)
         c1, c2 = st.columns(2)
-        with c1:
-            e.expertise_fr = st.text_input("Expertise FR", e.expertise_fr)
-        with c2:
-            e.expertise_en = st.text_input("Expertise EN", e.expertise_en)
+        with c1: e.expertise_fr = st.text_input("Expertise FR", e.expertise_fr)
+        with c2: e.expertise_en = st.text_input("Expertise EN", e.expertise_en)
     
+    # Réseaux Sociaux
     with tabs[3]:
+        st.subheader("📱 Réseaux Sociaux (sameAs)")
         social = st.session_state.social_links
         c1, c2 = st.columns(2)
         with c1:
             social['linkedin'] = st.text_input("LinkedIn", social['linkedin'])
-            social['twitter'] = st.text_input("Twitter", social['twitter'])
-        with c2:
+            social['twitter'] = st.text_input("Twitter/X", social['twitter'])
             social['facebook'] = st.text_input("Facebook", social['facebook'])
+        with c2:
+            social['instagram'] = st.text_input("Instagram", social['instagram'])
+            social['tiktok'] = st.text_input("TikTok", social['tiktok'])
             social['youtube'] = st.text_input("YouTube", social['youtube'])
     
+    # JSON-LD
     with tabs[4]:
-        # JSON-LD
         same_as = [f"https://www.wikidata.org/wiki/{e.qid}"] if e.qid else []
         same_as.extend([v for v in st.session_state.social_links.values() if v])
         
-        json_ld = {
-            "@context": "https://schema.org",
-            "@type": e.org_type,
-            "name": e.name
-        }
-        if e.website:
-            json_ld["url"] = e.website
-        if e.siren:
-            json_ld["taxID"] = f"FR{e.siren}"
-        if same_as:
-            json_ld["sameAs"] = same_as
+        identifiers = []
+        if e.siren: identifiers.append({"@type": "PropertyValue", "propertyID": "SIREN", "value": e.siren})
+        if e.lei: identifiers.append({"@type": "PropertyValue", "propertyID": "LEI", "value": e.lei})
+        
+        json_ld = {"@context": "https://schema.org", "@type": e.org_type, "name": e.name}
+        if e.legal_name: json_ld["legalName"] = e.legal_name
+        if e.website: json_ld["@id"], json_ld["url"] = f"{e.website.rstrip('/')}/#organization", e.website
+        if e.description_fr: json_ld["description"] = e.description_fr
+        if e.siren: json_ld["taxID"] = f"FR{e.siren}"
+        if identifiers: json_ld["identifier"] = identifiers
+        if same_as: json_ld["sameAs"] = same_as
+        if e.address: json_ld["address"] = {"@type": "PostalAddress", "streetAddress": e.address}
+        if e.expertise_fr: json_ld["knowsAbout"] = [x.strip() for x in e.expertise_fr.split(',')]
         if e.parent_org_name:
-            json_ld["parentOrganization"] = {
-                "@type": "Organization",
-                "name": e.parent_org_name
-            }
-            if e.parent_org_qid:
-                json_ld["parentOrganization"]["sameAs"] = f"https://www.wikidata.org/wiki/{e.parent_org_qid}"
+            json_ld["parentOrganization"] = {"@type": "Organization", "name": e.parent_org_name}
+            if e.parent_org_qid: json_ld["parentOrganization"]["sameAs"] = f"https://www.wikidata.org/wiki/{e.parent_org_qid}"
+            if e.parent_org_siren: json_ld["parentOrganization"]["taxID"] = f"FR{e.parent_org_siren}"
         
         st.json(json_ld)
-        st.download_button("💾 Télécharger", json.dumps(json_ld, indent=2, ensure_ascii=False), "schema.json")
+        c1, c2 = st.columns(2)
+        with c1: st.download_button("📄 JSON-LD", json.dumps(json_ld, indent=2, ensure_ascii=False), "schema.json")
+        with c2: st.download_button("💾 Config", json.dumps({"entity": asdict(e), "social": st.session_state.social_links}, indent=2, ensure_ascii=False), "config.json")
 
 else:
     st.info("👈 Recherche une organisation")
     st.markdown(f"""
-    ### v{VERSION} - Filiation Enhanced
-    
-    **Nouvelles sources de filiation:**
-    - P749 (parent organization)
-    - P127 (owned by) - fallback
-    - Mistral AI avec prompt optimisé
-    
-    **Test:** Cherche "Boursorama" puis clique sur **GEO Magic** pour détecter Société Générale comme parent!
+    ### v{VERSION} - Nouveautés
+    - **SIREN maison mère** auto-récupéré (Wikidata + INSEE)
+    - **Réseaux sociaux** : LinkedIn, Twitter/X, Facebook, Instagram, TikTok, YouTube
+    - **Filiation** : P749 + P127 + Mistral
     """)
 
 st.divider()
